@@ -33,8 +33,8 @@ use clap::{arg, Arg, ArgAction, Command as ClapCommand};
 fn cli() -> ClapCommand {
     ClapCommand::new("pass-rs")
         .version("1.0")
-        .author("Your Name <your.email@example.com>")
-        .about("A password manager")
+        .author("Ricky Nelson <rickyn@socketwiz.com>")
+        .about("A GPG-based password manager inspired by `pass`, built in Rust")
         .subcommand(
             ClapCommand::new("init")
                 .about("Initialize new password storage and use gpg-id for encryption")

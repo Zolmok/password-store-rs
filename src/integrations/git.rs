@@ -84,7 +84,7 @@ pub fn git_add_file(file_path: &str, message: &str) -> Result<(), String> {
 /// // Remove a file from Git with a commit message.
 /// git_remove_file("path/to/file.txt", "Remove file.txt from repository");
 /// ```
-pub fn git_remove_file(file_path: &str, message: &str) {
+pub fn _git_remove_file(file_path: &str, message: &str) {
     use std::process::Command;
 
     // Run "git rm <file_path>".
