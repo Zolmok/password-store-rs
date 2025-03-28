@@ -1,7 +1,8 @@
 mod commands;
+mod integrations;
 mod utils;
 
-use clap::{arg, Command as ClapCommand};
+use clap::{arg, Arg, ArgAction, Command as ClapCommand};
 
 /// Constructs the command-line interface (CLI) for the password store application.
 ///
@@ -10,9 +11,13 @@ use clap::{arg, Command as ClapCommand};
 ///
 /// - **init**: Initializes a new password store by specifying a GPG key identifier and an optional subfolder.
 /// - **add**: Adds a new password entry to the store. The password can be provided directly as an argument,
-///   or, if omitted, the user will be prompted to enter it interactively.
+///   or, if omitted, the user will be prompted to enter it interactively. In addition, the "add" subcommand
+///   supports extra options:
+///     - `--multiline` (`-m`): Read the password input in multiline mode (until EOF).
+///     - `--echo` (`-e`): Read the password with echo enabled (i.e. visible input).
+///     - `--force` (`-f`): Force overwrite an existing entry without prompting for confirmation.
 /// - **show**: Displays an existing password entry (and can optionally place it on the clipboard).
-/// - **find**: Searches for passwords matching a specified query.
+/// - **find**: Searches for passwords matching a specified query (pass-name).
 ///
 /// # Examples
 ///
@@ -39,9 +44,30 @@ fn cli() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("add")
-                .about("Add a new password")
+                .about("Add a new password entry")
                 .arg(arg!(<PASS_NAME> "The name of the password entry").value_name("pass-name"))
-                .arg(arg!([PASSWORD] "The password to store (if not provided, you will be prompted)").value_name("password"))
+                .arg(arg!([PASSWORD] "The password to store (if not provided, you will be prompted)").value_name("PASSWORD"))
+                .arg(
+                    Arg::new("multiline")
+                        .short('m')
+                        .long("multiline")
+                        .help("Read password in multiline mode")
+                        .action(ArgAction::SetTrue)
+                )
+                .arg(
+                    Arg::new("echo")
+                        .short('e')
+                        .long("echo")
+                        .help("Read password with echo enabled")
+                        .action(ArgAction::SetTrue)
+                )
+                .arg(
+                    Arg::new("force")
+                        .short('f')
+                        .long("force")
+                        .help("Force overwrite an existing entry")
+                        .action(ArgAction::SetTrue)
+                ),
         )
         .subcommand(
             ClapCommand::new("show")
@@ -61,12 +87,12 @@ fn cli() -> ClapCommand {
 /// This function performs the following steps:
 /// 1. Constructs the command-line interface (CLI) by calling the [`cli`] function.
 /// 2. Parses the command-line arguments using Clap.
-/// 3. Dispatches to the appropriate command handler based on the provided subcommand.
+/// 3. Dispatches to the appropriate command handler based on the provided subcommand:
 ///    - **init**: Initializes a new password store.
 ///    - **add**: Adds a new password entry to the store.
 ///    - **show**: Displays an existing password entry (and optionally places it on the clipboard).
 ///    - **find**: Searches for password entries matching a query.
-/// 4. If no valid subcommand is provided, it prints the help message to guide the user.
+/// 4. If no valid subcommand is provided, it calls `cmd_show` to display the entire password store.
 ///
 /// # Example
 ///
@@ -76,9 +102,9 @@ fn cli() -> ClapCommand {
 /// cargo run -- init 123 -p socketwiz
 /// ```
 ///
-/// If no subcommand is provided, the application will print the help message.
+/// If no subcommand is provided, the application will display the password store.
 fn main() {
-    let mut app = cli();
+    let app = cli();
     let matches = app.clone().get_matches();
 
     match matches.subcommand() {
@@ -90,6 +116,7 @@ fn main() {
                 .get_one::<String>("subfolder")
                 .map(String::as_str)
                 .unwrap_or("");
+
             commands::init::cmd_init(&format!("{}/{}", gpg_id, subfolder));
         }
         Some(("add", sub_matches)) => {
@@ -97,30 +124,32 @@ fn main() {
                 .get_one::<String>("PASS_NAME")
                 .expect("PASS_NAME is required");
             let maybe_password = sub_matches
-                .get_one::<String>("password")
+                .get_one::<String>("PASSWORD")
                 .map(|s| s.as_str());
-            commands::add::cmd_add(pass_name, maybe_password);
+            let multiline = sub_matches.get_flag("multiline");
+            let echo = sub_matches.get_flag("echo");
+            let force = sub_matches.get_flag("force");
+
+            commands::add::cmd_add(pass_name, maybe_password, multiline, echo, force);
         }
         Some(("show", sub_matches)) => {
             let pass_name = sub_matches
                 .get_one::<String>("PASS_NAME")
                 .map(String::as_str)
                 .unwrap_or("");
+
             commands::show::cmd_show(pass_name);
         }
         Some(("find", sub_matches)) => {
             let pass_names = sub_matches
                 .get_one::<String>("PASS_NAMES")
                 .expect("PASS_NAMES is required");
+
             commands::find::cmd_find(pass_names);
         }
         _ => {
-            // Print help if no valid subcommand is provided.
-            app.print_help().expect("Failed to print help");
-            println!();
+            // When no subcommand is provided, display the password store.
+            commands::show::cmd_show("");
         }
     }
 }
-
-
-

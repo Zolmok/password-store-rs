@@ -51,7 +51,7 @@ pub fn cmd_show(pass_name: &str) {
         println!("{}", pass);
     } else if Path::new(&*PREFIX).exists() {
         if pass_name.is_empty() {
-            println!("Password Store:");
+            println!("Password Store");
         } else {
             let trimmed_path = passfile.trim_end_matches('/');
             println!("{}", trimmed_path);
