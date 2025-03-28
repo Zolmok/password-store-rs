@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{exit, Command, Stdio};
 
 /// Signs the specified file using GPG with a detached signature.
 ///
@@ -245,4 +246,157 @@ pub fn reencrypt_path(path: &str) -> Result<(), String> {
     }
 
     reencrypt_dir(root, &recipient)
+}
+
+/// Returns a set of all GPG key fingerprints currently available in the keyring.
+///
+/// This function runs `gpg --list-keys --with-colons` and parses its output
+/// to extract all fingerprint (`fpr`) entries. It collects fingerprints from
+/// both primary keys and subkeys.
+///
+/// # Returns
+///
+/// A `HashSet<String>` containing the fingerprints of all public keys (both
+/// primary and subkeys) found in the GPG keyring.
+///
+/// # Panics
+///
+/// This function will panic if the `gpg` command fails to execute successfully.
+///
+/// # Notes
+///
+/// - Fingerprints are returned as-is in the order parsed from the output.
+/// - Duplicate entries are automatically de-duplicated by the `HashSet`.
+/// - If you want only primary key fingerprints, use [`get_primary_fingerprint`] instead.
+///
+/// # Example
+///
+/// ```rust
+/// let fingerprints = list_key_fingerprints();
+/// for fpr in &fingerprints {
+///     println!(\"Key: {}\", fpr);
+/// }
+/// ```
+pub fn list_key_fingerprints() -> HashSet<String> {
+    let output = Command::new("gpg")
+        .args(["--list-keys", "--with-colons"])
+        .output()
+        .expect("Failed to list GPG keys");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with("fpr:") {
+                line.split(':').nth(9).map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Returns the fingerprint of the most recently listed primary GPG key (if any).
+///
+/// This function parses the output of `gpg --list-keys --with-colons` to find the
+/// fingerprint (`fpr`) line immediately following a `pub` (public key) line.
+/// It assumes that the GPG keyring is in a consistent format and that the fingerprint
+/// for each primary key directly follows its `pub:` entry.
+///
+/// # Returns
+///
+/// - `Some(String)` containing the fingerprint of the first encountered primary key.
+/// - `None` if no valid primary key fingerprint can be found.
+///
+/// # Panics
+///
+/// This function panics if the `gpg` command fails to execute.
+///
+/// # Notes
+///
+/// - This only returns the **first** primary key found in the output.
+/// - It ignores subkey (`sub:`) entries and their fingerprints.
+/// - Suitable for use cases where a single default or most recently generated key is expected.
+///
+/// # Example
+///
+/// ```rust
+/// if let Some(fpr) = get_primary_fingerprint() {
+///     println!(\"Primary key fingerprint: {}\", fpr);
+/// } else {
+///     println!(\"No primary GPG key found.\");
+/// }
+/// ```
+pub fn get_primary_fingerprint() -> Option<String> {
+    let output = Command::new("gpg")
+        .args(["--list-keys", "--with-colons"])
+        .output()
+        .expect("Failed to list GPG keys");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut in_pub = false;
+
+    for line in stdout.lines() {
+        if line.starts_with("pub:") {
+            in_pub = true;
+        } else if in_pub && line.starts_with("fpr:") {
+            return line.split(':').nth(9).map(|s| s.to_string());
+        }
+    }
+
+    None
+}
+
+/// Generates a new GPG key using the interactive `gpg --full-gen-key` command
+/// and returns the fingerprint of the newly created **primary** key.
+///
+/// This function invokes GPG in interactive mode to create a new key pair.
+/// After generation, it retrieves and returns the fingerprint of the primary
+/// key (not the subkey), which is typically used for signing and identifying
+/// the key.
+///
+/// # Returns
+///
+/// A `String` representing the fingerprint of the newly generated primary key.
+///
+/// # Panics
+///
+/// This function will terminate the program (`exit(1)`) if:
+/// - The `gpg` command fails to execute.
+/// - The user cancels or fails to complete the key generation.
+/// - The primary key fingerprint cannot be extracted after key creation.
+///
+/// # Notes
+///
+/// - The GPG interface is interactive and requires user input.
+/// - It is assumed that the key created is the most recent one in the keyring.
+///
+/// # Example
+///
+/// ```rust
+/// let new_fpr = generate_new_gpg_key();
+/// println!(\"New GPG key fingerprint: {}\", new_fpr);
+/// ```
+pub fn generate_new_gpg_key() -> String {
+    let _before_keys = list_key_fingerprints(); // optional; can be removed
+
+    let status = Command::new("gpg")
+        .arg("--full-gen-key")
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to execute gpg --full-gen-key: {}", e);
+            exit(1);
+        });
+
+    if !status.success() {
+        eprintln!("Failed to generate a new GPG key.");
+        exit(1);
+    }
+
+    let fingerprint = get_primary_fingerprint().unwrap_or_else(|| {
+        eprintln!("Failed to extract primary fingerprint from generated key.");
+        exit(1);
+    });
+
+    fingerprint
 }

@@ -38,9 +38,10 @@ fn cli() -> ClapCommand {
         .subcommand(
             ClapCommand::new("init")
                 .about("Initialize new password storage and use gpg-id for encryption")
-                .arg(arg!(<GPGID> "Specifies a GPG key identifier").value_name("gpg-id"))
-                // Making the path optional:
-                .arg(arg!(-p --path [subfolder] "Specifies an optional subfolder").id("subfolder")),
+                .arg(arg!([GPGID] "Specifies a GPG key identifier").value_name("gpg-id"))
+                .arg(arg!(-p --path [subfolder] "Specifies an optional subfolder").id("subfolder"))
+                // Add a flag to force auto-generation even if a key was provided.
+                .arg(arg!(-a --auto "Automatically generate a new GPG key").action(ArgAction::SetTrue)),
         )
         .subcommand(
             ClapCommand::new("add")
@@ -109,15 +110,14 @@ fn main() {
 
     match matches.subcommand() {
         Some(("init", sub_matches)) => {
-            let gpg_id = sub_matches
-                .get_one::<String>("GPGID")
-                .expect("GPGID is required");
+            let gpg_id_opt = sub_matches.get_one::<String>("GPGID").map(String::as_str);
             let subfolder = sub_matches
                 .get_one::<String>("subfolder")
                 .map(String::as_str)
                 .unwrap_or("");
+            let auto = sub_matches.get_flag("auto");
 
-            commands::init::cmd_init(&format!("{}/{}", gpg_id, subfolder));
+            commands::init::cmd_init(gpg_id_opt, subfolder, auto);
         }
         Some(("add", sub_matches)) => {
             let pass_name = sub_matches

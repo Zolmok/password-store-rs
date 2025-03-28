@@ -1,5 +1,4 @@
 use crate::utils::PREFIX;
-
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -11,14 +10,15 @@ use std::process::{exit, Command, Stdio};
 /// 1. Verifies that the password store exists (using the directory defined by [`PREFIX`]).
 /// 2. Constructs the file path for the new entry as `<PREFIX>/<pass_name>.gpg`.
 /// 3. Reads the GPG recipient from the `.gpg-id` file in the password store.
-/// 4. If the entry already exists and force is not enabled, prompts the user to confirm overwrite.
-/// 5. Prompts for the password using one of three modes:
+/// 4. Checks if a public key exists for the recipient. If not, prompts the user to generate one.
+/// 5. If the entry already exists and force is not enabled, prompts the user to confirm overwrite.
+/// 6. Prompts for the password using one of three modes:
 ///    - **Multiline mode (`multiline == true`)**: Reads until EOF.
 ///    - **No-echo mode (`echo == false`)**: Reads the password hidden and asks for confirmation.
 ///    - **Echo mode (`echo == true`)**: Reads the password with echo.
-/// 6. Encrypts the password using the GPG command with the specified recipient, writing the encrypted
+/// 7. Encrypts the password using the GPG command with the specified recipient, writing the encrypted
 ///    output to the target file.
-/// 7. Exits the process with an error if any step fails.
+/// 8. Exits the process with an error if any step fails.
 ///
 /// # Arguments
 ///
@@ -33,6 +33,7 @@ use std::process::{exit, Command, Stdio};
 /// This function terminates the process if:
 /// - The password store does not exist.
 /// - Reading the `.gpg-id` file fails.
+/// - No public key is available for the recipient (and the user declines to generate one).
 /// - The GPG command fails to execute or returns a non-success status.
 /// - In no-echo mode, the passwords do not match.
 ///
@@ -79,9 +80,64 @@ pub fn cmd_add(
         }
     };
 
+    // Check that a public key exists for the recipient.
+    let key_check = Command::new("gpg")
+        .args(&["--list-keys", &recipient])
+        .output();
+    match key_check {
+        Ok(output) => {
+            if !output.status.success() || output.stdout.is_empty() {
+                // No key found; prompt the user.
+                eprintln!("No public key for recipient '{}' found.", recipient);
+                print!("Would you like to generate a new GPG key now? [y/N]: ");
+                io::stdout().flush().unwrap();
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer).is_err() {
+                    eprintln!("Failed to read input.");
+                    exit(1);
+                }
+                if answer.trim().to_lowercase().starts_with('y') {
+                    let status = Command::new("gpg")
+                        .arg("--full-gen-key")
+                        .status()
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to execute gpg --full-gen-key: {}", e);
+                            exit(1);
+                        });
+                    if !status.success() {
+                        eprintln!("GPG key generation failed.");
+                        exit(1);
+                    }
+                    // After key generation, check again.
+                    let new_check = Command::new("gpg")
+                        .args(&["--list-keys", &recipient])
+                        .output()
+                        .unwrap();
+                    if new_check.stdout.is_empty() {
+                        eprintln!(
+                            "No public key found for recipient '{}' even after key generation.",
+                            recipient
+                        );
+                        exit(1);
+                    }
+                } else {
+                    eprintln!("A valid GPG key is required to add a password entry.");
+                    exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error checking for GPG key: {}", e);
+            exit(1);
+        }
+    }
+
     // Check if entry exists and force is not set.
     if !force && Path::new(&passfile).exists() {
-        print!("An entry already exists for {}. Overwrite it? [y/N]: ", pass_name);
+        print!(
+            "An entry already exists for {}. Overwrite it? [y/N]: ",
+            pass_name
+        );
         io::stdout().flush().unwrap();
         let mut answer = String::new();
         if io::stdin().read_line(&mut answer).is_err() {
@@ -106,7 +162,10 @@ pub fn cmd_add(
     let password: String = if let Some(p) = maybe_password {
         p.to_string()
     } else if multiline {
-        println!("Enter contents of {} and press Ctrl+D when finished:", pass_name);
+        println!(
+            "Enter contents of {} and press Ctrl+D when finished:",
+            pass_name
+        );
         let mut buffer = String::new();
         match io::stdin().read_to_string(&mut buffer) {
             Ok(_) => buffer.trim().to_string(),
@@ -122,12 +181,12 @@ pub fn cmd_add(
                 eprintln!("Failed to read password: {}", e);
                 exit(1);
             });
-        let password_again = rpassword::prompt_password(&format!("Retype password for {}: ", pass_name))
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to read password confirmation: {}", e);
-                exit(1);
-            });
-
+        let password_again =
+            rpassword::prompt_password(&format!("Retype password for {}: ", pass_name))
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to read password confirmation: {}", e);
+                    exit(1);
+                });
         if password != password_again {
             eprintln!("Error: the entered passwords do not match.");
             exit(1);
@@ -187,5 +246,12 @@ pub fn cmd_add(
 
     println!("Password for '{}' added successfully.", pass_name);
 
+    // Optionally, add the new password file to Git.
+    // Uncomment the following lines to integrate with Git:
     // git_add_file(&passfile, &format!("Add given password for {} to store.", pass_name))
+    //     .unwrap_or_else(|e| {
+    //         eprintln!("Error adding {} to git: {}", passfile, e);
+    //         exit(1);
+    //     });
 }
+

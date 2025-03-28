@@ -1,167 +1,138 @@
 use std::fs;
-use std::path::Path;
-use std::process::exit;
+use std::process::{exit, Command};
 
-use crate::integrations::git::{git_add_file, git_remove_file};
-use crate::integrations::gpg::{reencrypt_path, sign_file};
+use crate::integrations::git::git_add_file;
+use crate::integrations::gpg::{generate_new_gpg_key, reencrypt_path, sign_file};
 use crate::utils::PREFIX;
 
-/// Initializes (or deinitializes) the password store with a new GPG ID.
+/// Initializes a new password store by creating a `.gpg-id` file with the specified or generated GPG key.
 ///
-/// This function replicates the behavior of the original pass script's `cmd_init` command. It performs
-/// the following steps:
-///
-/// 1. Parses the input string, which is expected to be in the format `"GPG_ID[/subfolder]"`.
-///    - The first part is the GPG key identifier. If it is an empty string, the function will attempt to
-///      deinitialize (remove) the existing GPG configuration.
-///    - The optional subfolder specifies a subdirectory under the password store.
-/// 2. Constructs the target store directory as `<PREFIX>[/subfolder]`.
-/// 3. If deinitializing (i.e. the provided GPG ID is empty):
-///    - Verifies that the `.gpg-id` file exists in the store directory and then removes it.
-///    - Attempts to remove the store directory if it becomes empty.
-/// 4. Otherwise (initializing):
-///    - Creates the store directory (if it does not already exist).
-///    - Writes the provided GPG ID(s) (followed by a newline) to a `.gpg-id` file within the store directory.
-///    - If the environment variable `PASSWORD_STORE_SIGNING_KEY` is set, the function attempts to sign the
-///      `.gpg-id` file using a signing function.
-///    - (Optionally) The function would add the file(s) to Git.
-/// 5. In all cases, the function calls functions to reencrypt the store and add changes to Git.
+/// This function performs the equivalent of the `pass init` command. It sets up a
+/// password store directory (optionally scoped to a subfolder) and configures it
+/// with a GPG key ID used for encryption. If no GPG ID is provided or the `--auto`
+/// flag is set, a new key is generated interactively using GPG.
 ///
 /// # Arguments
 ///
-/// * `path` - A string slice in the format `"GPG_ID[/subfolder]"`. An empty GPG_ID indicates that the
-///            existing configuration should be deinitialized.
+/// * `gpg_id_input` - An optional GPG key identifier as a string slice. If `None`
+///   or if the key is not found in the keyring, a new key will be generated.
+/// * `subfolder` - An optional subfolder under the password store root. If non-empty,
+///   the `.gpg-id` will be placed in this subdirectory.
+/// * `auto` - A boolean flag indicating whether to force GPG key generation even
+///   if a GPG ID is provided.
 ///
-/// # Panics
+/// # Behavior
 ///
-/// The function will terminate the process if:
-/// - The directory creation or file operations fail.
-/// - The deinitialization branch is invoked but no `.gpg-id` file exists.
-/// - Signing is enabled but signing fails.
-/// - Reencrypting or adding files to Git fails.
+/// - Ensures the password store directory exists (creates it if needed).
+/// - Writes the GPG ID to a `.gpg-id` file inside the store.
+/// - Optionally signs the `.gpg-id` file using `PASSWORD_STORE_SIGNING_KEY`.
+/// - Re-encrypts the store contents (if applicable).
+/// - Stages changes in Git, if Git is enabled.
 ///
-/// # Examples
+/// # Panics / Exits
+///
+/// This function terminates the program (`exit(1)`) if:
+/// - GPG commands fail to run or return errors.
+/// - Filesystem operations fail (creating directories, writing files).
+/// - Git operations fail (e.g. staging files).
+/// - GPG key generation or fingerprint extraction fails.
+///
+/// # Example
 ///
 /// ```rust
-/// // To initialize the store with GPG ID "123" in the "socketwiz" subfolder:
-/// cmd_init("123/socketwiz");
+/// // Initialize with an existing key
+/// cmd_init(Some(\"34E8F4A6A3851A5C\"), \"\", false);
 ///
-/// // To initialize the store with GPG ID "123" at the default location:
-/// cmd_init("123");
-///
-/// // To deinitialize (remove) the current GPG ID (assuming the optional subfolder is provided as needed):
-/// cmd_init("/socketwiz");
+/// // Initialize with a new key
+/// cmd_init(None, \"my/project\", true);
 /// ```
-pub fn cmd_init(path: &str) {
-    println!("Initialize new password storage at {}", path);
+pub fn cmd_init(gpg_id_input: Option<&str>, subfolder: &str, auto: bool) {
+    println!("Initialize new password storage");
 
-    // Split the input into GPG ID and optional subfolder.
-    let mut parts = path.splitn(2, '/');
-    let gpg_id_input = parts.next().unwrap_or(""); // may be empty for deinit
-    let subfolder = parts.next().unwrap_or("");
-
-    // Determine the target store directory.
     let store_dir = if subfolder.is_empty() {
         format!("{}", &*PREFIX)
     } else {
         format!("{}/{}", &*PREFIX, subfolder)
     };
 
-    // Build the full path to the .gpg-id file.
     let gpg_id_file = format!("{}/.gpg-id", store_dir);
 
-    // If the provided GPG ID is empty, we are in deinitialization mode.
-    if gpg_id_input.trim().is_empty() {
-        if !Path::new(&gpg_id_file).exists() {
-            eprintln!(
-                "Error: {} does not exist and so cannot be removed.",
-                gpg_id_file
-            );
-            exit(1);
-        }
-
-        if let Err(e) = fs::remove_file(&gpg_id_file) {
-            eprintln!("Error removing {}: {}", gpg_id_file, e);
-            exit(1);
-        }
-
-        println!("Removed {}", gpg_id_file);
-
-        git_remove_file(
-            &gpg_id_file,
-            &format!(
-                "Deinitialize {}{}",
-                gpg_id_file,
-                if subfolder.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" ({})", subfolder)
-                }
-            ),
-        );
-
-        // Attempt to remove the directory if empty.
-        if let Err(e) = fs::remove_dir(&store_dir) {
-            eprintln!("Warning: Could not remove directory {}: {}", store_dir, e);
-        }
+    let key_id = if auto || gpg_id_input.is_none() {
+        println!("No GPG ID provided or auto flag set. Generating a new GPG key...");
+        generate_new_gpg_key()
     } else {
-        // Initialization branch.
-        if let Err(e) = fs::create_dir_all(&store_dir) {
-            eprintln!("Error creating directory {}: {}", store_dir, e);
-            exit(1);
-        }
+        let provided = gpg_id_input.unwrap().trim();
+        let output = Command::new("gpg")
+            .arg("--list-keys")
+            .arg(provided)
+            .output()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to execute gpg --list-keys: {}", e);
+                exit(1);
+            });
 
-        // Write the provided GPG ID(s) to the .gpg-id file.
-        if let Err(e) = fs::write(&gpg_id_file, format!("{}\n", gpg_id_input)) {
-            eprintln!("Error writing .gpg-id file {}: {}", gpg_id_file, e);
-            exit(1);
+        if output.stdout.is_empty() {
+            println!(
+                "Provided key '{}' not found. Generating a new key...",
+                provided
+            );
+            generate_new_gpg_key()
+        } else {
+            provided.to_string()
         }
-        println!(
-            "Password store initialized for {}{}",
-            gpg_id_input,
+    };
+
+    if let Err(e) = fs::create_dir_all(&store_dir) {
+        eprintln!("Error creating directory {}: {}", store_dir, e);
+        exit(1);
+    }
+
+    if let Err(e) = fs::write(&gpg_id_file, format!("{}\n", key_id)) {
+        eprintln!("Error writing .gpg-id file {}: {}", gpg_id_file, e);
+        exit(1);
+    }
+    println!(
+        "Password store initialized for {}{}",
+        key_id,
+        if subfolder.is_empty() {
+            "".to_string()
+        } else {
+            format!(" ({})", subfolder)
+        }
+    );
+
+    if let Err(e) = git_add_file(
+        &gpg_id_file,
+        &format!(
+            "Set GPG id to {}{}",
+            key_id,
             if subfolder.is_empty() {
                 "".to_string()
             } else {
                 format!(" ({})", subfolder)
             }
-        );
+        ),
+    ) {
+        eprintln!("Error adding {} to git: {}", gpg_id_file, e);
+        exit(1);
+    }
 
-        if let Err(e) = git_add_file(
-            &gpg_id_file,
-            &format!(
-                "Set GPG id to {}{}",
-                gpg_id_input,
-                if subfolder.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" ({})", subfolder)
-                }
-            ),
-        ) {
-            eprintln!("Error adding {} to git: {}", gpg_id_file, e);
-            exit(1);
-        }
-
-        // If a signing key is set, sign the .gpg-id file.
-        if let Ok(signing_keys) = std::env::var("PASSWORD_STORE_SIGNING_KEY") {
-            if !signing_keys.trim().is_empty() {
-                if let Err(e) = sign_file(&gpg_id_file) {
-                    eprintln!("Could not sign .gpg-id: {}", e);
-                    exit(1);
-                }
-
-                println!("Signed .gpg-id file.");
-
-                if let Err(e) = git_add_file(
-                    &(gpg_id_file.clone() + ".sig"),
-                    &format!(
-                        "Signing new GPG id with {}",
-                        signing_keys.replace(" ", ", ")
-                    ),
-                ) {
-                    eprintln!("Error adding {}.sig to git: {}", gpg_id_file, e);
-                    exit(1);
-                }
+    if let Ok(signing_keys) = std::env::var("PASSWORD_STORE_SIGNING_KEY") {
+        if !signing_keys.trim().is_empty() {
+            if let Err(e) = sign_file(&gpg_id_file) {
+                eprintln!("Could not sign .gpg-id: {}", e);
+                exit(1);
+            }
+            println!("Signed .gpg-id file.");
+            if let Err(e) = git_add_file(
+                &(gpg_id_file.clone() + ".sig"),
+                &format!(
+                    "Signing new GPG id with {}",
+                    signing_keys.replace(" ", ", ")
+                ),
+            ) {
+                eprintln!("Error adding {}.sig to git: {}", gpg_id_file, e);
+                exit(1);
             }
         }
     }
@@ -173,9 +144,10 @@ pub fn cmd_init(path: &str) {
 
     if let Err(e) = git_add_file(
         &store_dir,
-        &format!("Reencrypt password store using new GPG id {}", gpg_id_input),
+        &format!("Reencrypt password store using new GPG id {}", key_id),
     ) {
         eprintln!("Error adding {} to git: {}", store_dir, e);
         exit(1);
     }
 }
+
