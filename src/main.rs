@@ -3,8 +3,9 @@ use is_executable::IsExecutable;
 use once_cell::sync::Lazy;
 use std::{
     env, fs,
+    io::{self, Write},
     path::Path,
-    process::{exit, Command},
+    process::{exit, Command, Stdio},
 };
 
 static HOME: Lazy<String> = Lazy::new(|| match env::var("HOME") {
@@ -25,8 +26,15 @@ fn cli() -> ClapCommand {
         .subcommand(
             ClapCommand::new("init")
                 .about("Initialize new password storage and use gpg-id for encryption")
-                .arg(arg!(<GPGID> "Specifies a subfolder").value_name("gpg-id"))
-                .arg(arg!(-p --path <subfolder> "Specifies a subfolder")),
+                .arg(arg!(<GPGID> "Specifies a GPG key identifier").value_name("gpg-id"))
+                // Change from <subfolder> to [subfolder] to make it optional.
+                .arg(arg!(-p --path [subfolder] "Specifies an optional subfolder")),
+        )
+        .subcommand(
+            ClapCommand::new("add")
+                .about("Add a new password")
+                .arg(arg!(<PASS_NAME> "The name of the password entry").value_name("pass-name"))
+                .arg(arg!([PASSWORD] "The password to store (if not provided, you will be prompted)").value_name("password"))
         )
         .subcommand(
             ClapCommand::new("find")
@@ -109,6 +117,76 @@ fn source_file(file_path: &str, args: &[String]) {
         .expect("Failed to execute command");
 
     println!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+fn cmd_add(pass_name: &str, maybe_password: Option<&str>) {
+    // Ensure the password store directory exists.
+    if !Path::new(&*PREFIX).exists() {
+        eprintln!(
+            "Error: Password store '{}' does not exist. Try \"pass init\".",
+            &*PREFIX
+        );
+        exit(1);
+    }
+
+    // Determine the output file path for the new password.
+    let passfile = format!("{}/{}.gpg", &*PREFIX, pass_name);
+
+    // Read the GPG recipient from the .gpg-id file in the store.
+    let gpg_id_file = format!("{}/.gpg-id", &*PREFIX);
+    let recipient = match std::fs::read_to_string(&gpg_id_file) {
+        Ok(content) => content.trim().to_string(),
+        Err(e) => {
+            eprintln!(
+                "Error reading {}: {}. Is the store initialized?",
+                gpg_id_file, e
+            );
+            exit(1);
+        }
+    };
+
+    // Retrieve the password to store.
+    let password = if let Some(p) = maybe_password {
+        p.to_string()
+    } else {
+        println!("Enter password for {}:", pass_name);
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read password");
+        input.trim().to_string()
+    };
+
+    // Encrypt the password using gpg.
+    let mut child = Command::new("gpg")
+        .args(&[
+            "--encrypt",
+            "--yes",
+            "--batch",
+            "--recipient",
+            &recipient,
+            "--output",
+            &passfile,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Failed to execute gpg command");
+
+    {
+        // Write the password to gpg's stdin.
+        let child_stdin = child.stdin.as_mut().expect("Failed to open gpg stdin");
+        child_stdin
+            .write_all(password.as_bytes())
+            .expect("Failed to write password to gpg");
+    }
+
+    let status = child.wait().expect("Failed to wait on gpg");
+    if !status.success() {
+        eprintln!("gpg command failed with status: {}", status);
+        exit(1);
+    }
+
+    println!("Password for '{}' added successfully.", pass_name);
 }
 
 fn cmd_init(path: &str) {
@@ -268,10 +346,20 @@ fn main() {
                 .get_one::<String>("GPGID")
                 .expect("GPGID is required");
             let subfolder = sub_matches
-                .get_one::<String>("path") // <-- Use "path" here
-                .expect("subfolder is required");
+                .get_one::<String>("path")
+                .map(String::as_str)
+                .unwrap_or("");
 
             cmd_init(&format!("{}/{}", gpg_id, subfolder));
+        }
+        Some(("add", sub_matches)) => {
+            let pass_name = sub_matches
+                .get_one::<String>("PASS_NAME")
+                .expect("PASS_NAME is required");
+            let maybe_password = sub_matches
+                .get_one::<String>("PASSWORD")
+                .map(|s| s.as_str());
+            cmd_add(pass_name, maybe_password);
         }
         Some(("show", sub_matches)) => {
             let pass_name = sub_matches
@@ -302,4 +390,3 @@ fn main() {
         }
     }
 }
-
