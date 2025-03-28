@@ -378,8 +378,6 @@ pub fn get_primary_fingerprint() -> Option<String> {
 /// println!(\"New GPG key fingerprint: {}\", new_fpr);
 /// ```
 pub fn generate_new_gpg_key() -> String {
-    let _before_keys = list_key_fingerprints(); // optional; can be removed
-
     let status = Command::new("gpg")
         .arg("--full-gen-key")
         .status()
